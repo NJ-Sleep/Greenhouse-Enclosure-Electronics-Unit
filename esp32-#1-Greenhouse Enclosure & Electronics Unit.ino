@@ -90,32 +90,36 @@ const int RAW_MAX_OK = 4000;    // above = floating / unplugged
 const uint32_t WDT_TIMEOUT_S = 15;  // If system freezes for 15s reset loop
 
 // ---- OLED ---- CHANGE 0x3c to 0x3c if OLED BLANK
-const uint8_t OLED_ADDR = 0x3C;               //address where OLED data is stored 
-Adafruit_SSD1306 display(128, 64, &Wire, -1); //
+const uint8_t OLED_ADDR = 0x3C;               // Address where OLED data is stored 
+Adafruit_SSD1306 display(128, 64, &Wire, -1); // Setup OLED screen
 bool oledOk = false;
 
-// ============================== STATE =====================================
+// ============================== STATES =====================================
 
 Preferences prefs;
 
-float    m1Pct = NAN, m2Pct = NAN, avgPct = NAN;
-int      m1Raw = 0,   m2Raw = 0;
+// Sensor related
+float    m1Pct = NAN, m2Pct = NAN, avgPct = NAN;     // Percentage of M1 and M2, then Average
+int      m1Raw = 0, m2Raw = 0;                       // Default value of M1 and M2
 bool     m1Ok = false, m2Ok = false;
-bool     sensorFault = false;           // true when BOTH sensors are bad
+bool     sensorFault = false;                        // true when BOTH sensors are bad
 bool     reservoirHasWater = true;
 bool     lowWater = false;
 uint8_t  emptyStreak = 0;
 
+// Pump related
 bool     pumpOn = false;
 uint32_t pumpStartMs = 0;
 float    moistBefore = NAN;
 uint32_t lastCycleEndMs = 0;
 bool     hasCycled = false;
 
+// Data collection related
 uint32_t pumpSecToday = 0;
 uint16_t cyclesToday  = 0;
 uint32_t secIntoDay   = 0;              // rolling 24 h clock (no RTC on this board)
 
+// Data confirmation related
 uint32_t lastReadMs = 0, lastLevelMs = 0, lastStatusMs = 0, lastTickMs = 0;
 bool     postCheckPending = false;
 uint32_t postCheckAtMs = 0;
@@ -128,6 +132,13 @@ void relayOff() { digitalWrite(PIN_RELAY, LOW); }
 void relayOn()  { digitalWrite(PIN_RELAY, HIGH); }
 
 int readAveraged(uint8_t pin, uint8_t samples = 10) {
+  /*
+  =========================================
+  Used for Data collection Average
+  > For sensor values
+  > Data logging
+  > OLED screen values
+  =========================================*/
   uint32_t sum = 0;
   for (uint8_t i = 0; i < samples; i++) {
     sum += analogRead(pin);
@@ -137,6 +148,11 @@ int readAveraged(uint8_t pin, uint8_t samples = 10) {
 }
 
 float rawToPercent(int raw, int dry, int wet) {
+  /* 
+  =================================================
+  Converts Values to Percentage(%)
+  > General conversion of Raw Value to Percentage
+  ================================================= */
   float pct = (float)(dry - raw) * 100.0f / (float)(dry - wet);
   if (pct < 0)   pct = 0;
   if (pct > 100) pct = 100;
@@ -147,6 +163,10 @@ bool rawIsSane(int raw) { return raw > RAW_MIN_OK && raw < RAW_MAX_OK; }
 
 // Powers the probe for ~200 ms only, so it cannot corrode.
 bool readReservoir() {
+  /* 
+  ============================================
+  Probe only reads for 200ms every cycle/loop
+  ============================================ */
   if (!LEVEL_PROBE_FITTED) return true;
   digitalWrite(PIN_LEVEL_PWR, HIGH);
   delay(200);
@@ -157,12 +177,20 @@ bool readReservoir() {
 }
 
 void saveCounters() {
+  /* 
+  =========================================
+  Counter Values for Data collection
+  =========================================*/
   prefs.putUInt("pumpSec", pumpSecToday);
   prefs.putUShort("cycles", cyclesToday);
   prefs.putUInt("dayClock", secIntoDay);
 }
 
 void newDay() {
+  /* 
+  ==============================================
+  Resets Variables for new day data collection
+  ==============================================*/ 
   pumpSecToday = 0;
   cyclesToday = 0;
   secIntoDay = 0;
@@ -175,6 +203,10 @@ float jf(float v) { return isnan(v) ? -1.0f : v; }
 // ============================== SENSING ===================================
 
 void readSoil() {
+  /* 
+  ===============================================================
+  Contains all Variables used to determine whether to power pump
+  ===============================================================*/
   m1Raw = readAveraged(PIN_M1);
   m2Raw = readAveraged(PIN_M2);
   m1Ok = rawIsSane(m1Raw);
@@ -191,6 +223,10 @@ void readSoil() {
 }
 
 void checkReservoir() {
+  /*
+  =========================================
+  Checks Water level of Reservoir
+  ========================================= */
   reservoirHasWater = readReservoir();
   if (reservoirHasWater) { emptyStreak = 0; lowWater = false; }
   else {
@@ -203,6 +239,10 @@ void checkReservoir() {
 // ============================== UART TO #2 ================================
 
 void sendStatus() {
+  /* 
+  ============================================
+  Status and Statistics to OLED and 2nd ESP32
+  ============================================*/
   char buf[256];
   uint32_t capLeft = (pumpSecToday >= DAILY_CAP_S) ? 0 : (DAILY_CAP_S - pumpSecToday);
   snprintf(buf, sizeof(buf),
@@ -219,6 +259,10 @@ void sendStatus() {
 }
 
 void sendCycleEvent(uint32_t durS, float after, const char* reason) {
+  /*
+  ===========================================
+  Send report to ESP32 data logger per cycle
+  ===========================================*/
   char buf[256];
   snprintf(buf, sizeof(buf),
     "{\"node\":1,\"type\":\"cycle\",\"up\":%lu,\"dur\":%lu,\"before\":%.1f,\"after\":%.1f,"
@@ -231,6 +275,10 @@ void sendCycleEvent(uint32_t durS, float after, const char* reason) {
 }
 
 void sendPostCheck() {
+  /* 
+  =========================================
+  Sends Operations Status Safe/Error
+  =========================================*/
   char buf[160];
   snprintf(buf, sizeof(buf),
     "{\"node\":1,\"type\":\"settled\",\"up\":%lu,\"avg\":%.1f}",
@@ -241,6 +289,10 @@ void sendPostCheck() {
 
 // Commands from #2 (one per line). "DAY" = start a new day (midnight sync).
 void handleLine(const String& line) {
+  /*
+  ==============================================
+  Detects if new Day to Start new Day functions
+  ============================================== */
   if (line.indexOf("DAY") >= 0) {
     newDay();
     Serial.println("Daily counters reset by #2");
@@ -258,6 +310,10 @@ void pollSerial2() {
 // ============================== PUMP CONTROL ==============================
 
 void startPump() {
+  /*
+  ==============================================
+  Starts pump and updates daily watering cycles
+  ==============================================*/
   moistBefore = avgPct;
   pumpStartMs = millis();
   pumpOn = true;
@@ -267,6 +323,10 @@ void startPump() {
 }
 
 void stopPump(const char* reason) {
+  /* 
+  =========================================
+  Stops pump and Logs Cycle Event data
+  =========================================*/
   relayOff();
   pumpOn = false;
   uint32_t durS = (millis() - pumpStartMs) / 1000;
@@ -281,6 +341,14 @@ void stopPump(const char* reason) {
 }
 
 void controlLogic() {
+  /*
+  =========================================
+  CONTROLS
+  > Reservoir Level
+  > Moinsture Level
+  > Daily Watering Cap
+  > Pump on/off control
+  =========================================*/
   if (CAL_MODE) { relayOff(); return; }
 
   uint32_t now = millis();
@@ -305,6 +373,10 @@ void controlLogic() {
 // ============================== OLED ======================================
 
 void drawOled() {
+  /*
+  =========================================
+  Function to project Data to OLED
+  =========================================*/
   if (!oledOk) return;
   display.clearDisplay();
   display.setTextSize(1);
